@@ -39,6 +39,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "User_Auth",
     'rest_framework',
+    'rest_framework_simplejwt',
     'drf_spectacular',
     'rest_framework_simplejwt.token_blacklist',
 ]
@@ -145,9 +146,12 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 from datetime import timedelta
 
 SIMPLE_JWT = {
-    'ACCESS_TOKEN_LIFETIME': timedelta(hours=6),  # Short for regular
-    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),   # 30 days if "Remember me"
+    'ACCESS_TOKEN_LIFETIME': timedelta(minutes=15),  # Short-lived access token
+    'REFRESH_TOKEN_LIFETIME': timedelta(days=30),  # Longer-lived refresh token
+    'ROTATE_REFRESH_TOKENS': True,  # Enable refresh token rotation
+    'BLACKLIST_AFTER_ROTATION': True,  # Blacklist the refresh token after use
 }
+
 
 AUTH_USER_MODEL = 'User_Auth.CustomUser'
 
