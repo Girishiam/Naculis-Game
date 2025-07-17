@@ -1,6 +1,6 @@
 from django.contrib import admin
 from django.contrib.auth.admin import UserAdmin
-from .models import CustomUser, UserProfile
+from .models import CustomUser, UserProfile, UserDiscount
 
 # Custom filter for SuperUsers
 class SuperUserFilter(admin.SimpleListFilter):
@@ -28,7 +28,7 @@ class CustomUserAdmin(UserAdmin):
     search_fields = ['email', 'username']
     ordering = ['email']
     fieldsets = (
-        (None, {'fields': ('email', 'username', 'password')}),
+        (None, {'fields': ('email', 'username', 'password','role')}),
         ('Permissions', {'fields': ('is_superuser', 'is_staff', 'is_active')}),
     )
     add_fieldsets = (
@@ -40,6 +40,12 @@ class CustomUserAdmin(UserAdmin):
 # Register the CustomUser model with the admin panel
 admin.site.register(CustomUser, CustomUserAdmin)
 
+#discount
+class UserDiscountInline(admin.TabularInline):
+    model = UserDiscount
+    extra = 0  # Don’t show empty extra forms by default
+    readonly_fields = ('percent', 'reason', 'used', 'granted_at', 'used_at')
+    can_delete = False
 
 # UserProfileAdmin for managing UserProfile in Admin
 @admin.register(UserProfile)
@@ -55,3 +61,17 @@ class UserProfileAdmin(admin.ModelAdmin):
     def referral_link(self, obj):
         """Return the referral link of the user"""
         return obj.referral_link
+    inlines = [UserDiscountInline]
+
+
+@admin.register(UserDiscount)
+class UserDiscountAdmin(admin.ModelAdmin):
+    list_display = ['username', 'percent', 'reason', 'used', 'granted_at', 'used_at']
+    list_filter = ['used']
+    search_fields = ['user_profile__user__email', 'user_profile__user__username', 'reason']
+
+    def username(self, obj):
+        """Return the username of the user associated with the discount"""
+        return obj.user_profile.user.username
+    username.short_description = "User"
+

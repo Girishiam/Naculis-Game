@@ -1,6 +1,5 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
-from rest_framework import status
 from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework_simplejwt.tokens import RefreshToken
 from django.core.mail import send_mail
@@ -9,12 +8,25 @@ from django.conf import settings
 from datetime import timedelta
 from django.contrib.auth import authenticate
 import random
+from rest_framework.parsers import MultiPartParser, FormParser
 import uuid
-from .models import CustomUser, UserProfile
+from rest_framework import generics, permissions, status
+from django.utils import timezone
+
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
+from django.core.files.storage import default_storage
+from .models import CustomUser, UserProfile, UserDiscount
+
+
+
 from .serializers import (
     RegisterSerializer, LoginSerializer, EmailOTPSerializer,
-    UserProfileSerializer
+    UserProfileSerializer, UserProfileUpdateSerializer, UserDiscountSerializer
 )
+
 
 User = get_user_model()
 otp_storage = {}         # Temporary in-memory OTP store
@@ -25,14 +37,7 @@ verified_email = {}      # Temporary email verification store
 # -------------------------------
 # views.py
 
-from rest_framework.views import APIView
-from rest_framework.response import Response
-from rest_framework import status
-from rest_framework.permissions import AllowAny
-from django.contrib.auth import get_user_model
-from .models import UserProfile
-from .serializers import RegisterSerializer
-import uuid
+
 
 User = get_user_model()
 
@@ -40,66 +45,41 @@ class RegisterView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        referral_code = request.data.get('referral_code')  # Promo code entered manually
-        referral_code_from_url = request.query_params.get('ref')  # Referral code from the URL query parameter
-        
-        # Get the referral code, prioritizing the one in the body or query params
+        # Get referral code from body or URL
+        referral_code = request.data.get('referral_code')
+        referral_code_from_url = request.query_params.get('ref')
         referral_code_to_use = referral_code or referral_code_from_url
 
-        # Serialize the request data to create the user
-        serializer = RegisterSerializer(data=request.data)
+        data = request.data.copy()
+        if referral_code_to_use:
+            data['referral_code'] = referral_code_to_use
 
+        serializer = RegisterSerializer(data=data)
         if serializer.is_valid():
             try:
-                # Create the user
                 user = serializer.save()
-
-                # Ensure a user profile is created automatically
                 user_profile = user.userprofile
-                # Generate and save the referral code and referral link if not already set
+
+                # Generate referral code/link if not set
                 if not user_profile.referral_code:
                     user_profile.referral_code = user_profile.generate_referral_code()
+                if not user_profile.referral_link:
                     user_profile.referral_link = user_profile.generate_referral_link()
-                    user_profile.save()
+                user_profile.save()
 
-                # Handle referral logic if referral code/link is provided
-                if referral_code_to_use:
-                    try:
-                        # Check if the referral code exists
-                        referrer_profile = UserProfile.objects.get(referral_code=referral_code_to_use)
-
-                        # Link the new user to the referrer
-                        user_profile.referred_by = referrer_profile  # Assign the UserProfile instance
-                        user_profile.save()
-
-                        # Reward the referrer
-                        referrer_profile.xp += 20  # Reward referrer with 20 XP
-                        referrer_profile.gem += 1  # Reward referrer with 1 gem
-                        referrer_profile.referral_count += 1  # Increment the referral count
-                        referrer_profile.save()
-
-                        # Reward the new user (referee)
-                        user_profile.discount_on_next_purchase = 0.50  # 50% discount for the new user
-                        user_profile.xp += 10  # New user gets 10 XP for signing up
-                        user_profile.gem += 5  # New user gets 5 gems
-                        user_profile.save()
-
-                    except UserProfile.DoesNotExist:
-                        return Response({"error": "Invalid referral code."}, status=400)  # Return error if referral code is invalid
-
-                # Return the response with referral details (if applicable)
                 return Response({
                     "msg": "User registered successfully",
                     "referral_code": user_profile.referral_code,
                     "referral_link": user_profile.referral_link,
-                    "referred_by": user.userprofile.referred_by.user.username if user.userprofile.referred_by else None
+                    "referred_by": user_profile.referred_by.user.username if user_profile.referred_by else None
                 }, status=201)
 
             except Exception as e:
-                print(f"Error during registration: {str(e)}")  # Print the error message for debugging
+                print(f"Error during registration: {str(e)}")
                 return Response({"error": f"Registration failed. Please try again. Error: {str(e)}"}, status=500)
 
         return Response(serializer.errors, status=400)
+
 
 
 
@@ -314,3 +294,119 @@ class UserProfileView(APIView):
 
 
 
+# class UserProfileUpdateView(APIView):
+#     permission_classes = [IsAuthenticated]
+#     parser_classes = [MultiPartParser, FormParser]
+
+#     def put(self, request):
+#         user_profile = request.user.userprofile
+
+#         # If new profile_picture is uploaded, move old one to previous_profile_picture
+#         if 'profile_picture' in request.data and user_profile.profile_picture:
+#             user_profile.previous_profile_picture = user_profile.profile_picture
+
+#         serializer = UserProfileUpdateSerializer(
+#             user_profile,
+#             data=request.data,
+#             partial=True
+#         )
+#         if serializer.is_valid():
+#             serializer.save()
+#             return Response(serializer.data, status=200)
+#         return Response(serializer.errors, status=400)
+
+class UserProfileUpdateView(APIView):
+    permission_classes = [IsAuthenticated]
+    parser_classes = [MultiPartParser, FormParser]
+
+    def put(self, request):
+        user_profile = request.user.userprofile
+        serializer = UserProfileUpdateSerializer(user_profile, data=request.data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data, status=200)
+        return Response(serializer.errors, status=400)
+
+    def get(self, request):
+        user_profile = request.user.userprofile
+        serializer = UserProfileUpdateSerializer(user_profile)
+        return Response(serializer.data, status=200)
+
+
+class DeleteProfilePictureView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request):
+        user_profile = request.user.userprofile
+        if user_profile.profile_picture:
+            # Optional: Actually delete the image from Cloudinary storage
+            # You need to store the public_id of the image to do this (CloudinaryField stores it)
+            import cloudinary
+            try:
+                cloudinary.uploader.destroy(user_profile.profile_picture.public_id)
+            except Exception:
+                pass  # Ignore if delete fails
+
+            user_profile.profile_picture = None
+            user_profile.save()
+            return Response({"msg": "Profile picture deleted."}, status=status.HTTP_200_OK)
+        else:
+            return Response({"msg": "No profile picture to delete."}, status=status.HTTP_400_BAD_REQUEST)
+
+
+
+#discount
+# List all your own discounts
+class UserDiscountListView(generics.ListAPIView):
+    serializer_class = UserDiscountSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return UserDiscount.objects.filter(user_profile=self.request.user.userprofile)
+
+# Retrieve a specific discount (must be your own)
+class UserDiscountDetailView(generics.RetrieveAPIView):
+    serializer_class = UserDiscountSerializer
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get_queryset(self):
+        return UserDiscount.objects.filter(user_profile=self.request.user.userprofile)
+
+# Admin/staff: Create a discount for any user
+class AdminCreateDiscountView(generics.CreateAPIView):
+    serializer_class = UserDiscountSerializer
+    permission_classes = [permissions.IsAdminUser]
+
+    def perform_create(self, serializer):
+        user_profile_id = self.request.data.get('user_profile_id')
+        try:
+            user_profile = UserProfile.objects.get(id=user_profile_id)
+        except UserProfile.DoesNotExist:
+            raise serializers.ValidationError("UserProfile not found.")
+        serializer.save(user_profile=user_profile)
+
+# Mark a discount as used (apply a discount)
+from rest_framework.views import APIView
+
+class UseDiscountView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request, pk):
+        try:
+            discount = UserDiscount.objects.get(pk=pk, user_profile=request.user.userprofile)
+        except UserDiscount.DoesNotExist:
+            return Response({"detail": "Discount not found."}, status=404)
+
+        if discount.used:
+            return Response({"detail": "Discount already used."}, status=400)
+
+        discount.used = True
+        discount.used_at = timezone.now()
+        discount.save()
+        return Response({"detail": "Discount applied successfully."}, status=200)
+
+# (Optional) Delete a discount (admin only)
+class AdminDeleteDiscountView(generics.DestroyAPIView):
+    queryset = UserDiscount.objects.all()
+    serializer_class = UserDiscountSerializer
+    permission_classes = [permissions.IsAdminUser]

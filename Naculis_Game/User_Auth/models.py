@@ -2,9 +2,16 @@ from django.contrib.auth.models import AbstractUser
 from django.db import models
 from django_countries.fields import CountryField
 import uuid
-
+from cloudinary.models import CloudinaryField
 
 class CustomUser(AbstractUser):
+    ROLE_CHOICES = [
+        ('admin', 'Admin'),
+        ('staff', 'Staff'),
+        ('moderator', 'Moderator'),
+        ('user', 'User'),
+    ]
+    role = models.CharField(max_length=20, choices=ROLE_CHOICES, default='user')
     email = models.EmailField(unique=True)
     phone = models.CharField(max_length=15, blank=True, null=True)
 
@@ -29,7 +36,8 @@ class UserProfile(models.Model):
     dob = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=10, choices=GENDER_CHOICES, default='N')
     country = CountryField(blank_label='Select Country', null=True, blank=True)
-    profile_picture = models.ImageField(upload_to='profile_pictures/', blank=True, null=True)
+    profile_picture = CloudinaryField('image', blank=True, null=True)
+    previous_profile_picture = CloudinaryField('image', blank=True, null=True)
     balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
     xp = models.IntegerField(default=5)
     daily_streak = models.IntegerField(default=0)
@@ -39,7 +47,7 @@ class UserProfile(models.Model):
     referral_code = models.CharField(max_length=20, unique=True, blank=True, null=True)
     referral_link = models.URLField(max_length=200, blank=True, null=True)
     referred_by = models.ForeignKey('self', on_delete=models.SET_NULL, null=True, blank=True, related_name='referrals')
-    discount_used = models.BooleanField(default=False)  # Track if discount has been used
+    discount_used = models.BooleanField(default=False)  
     referral_count = models.IntegerField(default=0)
     date_joined = models.DateTimeField(auto_now_add=True)
 
@@ -67,10 +75,22 @@ class UserProfile(models.Model):
     def save(self, *args, **kwargs):
         """Override save to generate referral code and link if not already set."""
         if not self.referral_code:
-            self.referral_code = self.generate_referral_code()  # Generate referral code if not set
+            self.referral_code = self.generate_referral_code()
         
-        # Ensure referral link is based on the same referral code
+
         if not self.referral_link:
-            self.referral_link = self.generate_referral_link()  # Generate referral link
+            self.referral_link = self.generate_referral_link() 
         
-        super().save(*args, **kwargs)  # Save to the database
+        super().save(*args, **kwargs)  
+
+
+class UserDiscount(models.Model):
+    user_profile = models.ForeignKey(UserProfile, on_delete=models.CASCADE, related_name='discounts')
+    percent = models.DecimalField(max_digits=5, decimal_places=2)  # e.g., 50.00 for 50%
+    reason = models.CharField(max_length=64, blank=True, null=True)  # e.g., 'referral'
+    used = models.BooleanField(default=False)
+    granted_at = models.DateTimeField(auto_now_add=True)
+    used_at = models.DateTimeField(blank=True, null=True)
+
+    def __str__(self):
+        return f"{self.user_profile.user.username}: {self.percent}% ({'used' if self.used else 'unused'})"

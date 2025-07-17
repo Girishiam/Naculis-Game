@@ -11,6 +11,8 @@ https://docs.djangoproject.com/en/4.2/ref/settings/
 """
 
 from pathlib import Path
+import os
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -37,11 +39,19 @@ INSTALLED_APPS = [
     "django.contrib.sessions",
     "django.contrib.messages",
     "django.contrib.staticfiles",
+
+    #PROJECT APPS
     "User_Auth",
+
+
+
+    #THIRD PARTY APPS
     'rest_framework',
     'rest_framework_simplejwt',
     'drf_spectacular',
     'rest_framework_simplejwt.token_blacklist',
+    'cloudinary',
+    'cloudinary_storage',
 ]
 
 
@@ -135,7 +145,19 @@ USE_TZ = True
 # Static files (CSS, JavaScript, Images)
 # https://docs.djangoproject.com/en/4.2/howto/static-files/
 
-STATIC_URL = "static/"
+STATIC_URL = '/static/'
+STATICFILES_DIRS = [
+    os.path.join(BASE_DIR,'static')
+]
+STATIC_ROOT = os.path.join(BASE_DIR,'assets')
+
+
+MEDIA_URL = '/media/'
+MEDIA_ROOT = os.path.join(BASE_DIR,'media')
+
+
+
+
 
 # Default primary key field type
 # https://docs.djangoproject.com/en/4.2/ref/settings/#default-auto-field
@@ -163,3 +185,18 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'girishh.moo@gmail.com'  # Replace with your Gmail
 EMAIL_HOST_PASSWORD = 'rxpp isdn lcyr ssze'  
 DEFAULT_FROM_EMAIL = EMAIL_HOST_USER
+
+
+import cloudinary
+import cloudinary.uploader
+from cloudinary.utils import cloudinary_url
+
+# Configuration       
+cloudinary.config( 
+    cloud_name = "dhttlvlo6", 
+    api_key = "869973635977196", 
+    api_secret = "Y2fBEDC-Fzwfa0OOtq85juCWI9w", # Click 'View API Keys' above to copy your API secret
+    secure=True
+)
+
+DEFAULT_FILE_STORAGE = 'cloudinary_storage.storage.MediaCloudinaryStorage'
