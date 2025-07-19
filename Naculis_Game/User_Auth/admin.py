@@ -50,7 +50,7 @@ class UserDiscountInline(admin.TabularInline):
 # UserProfileAdmin for managing UserProfile in Admin
 @admin.register(UserProfile)
 class UserProfileAdmin(admin.ModelAdmin):
-    list_display = ['user', 'referral_code', 'referral_link', 'referred_by', 'gender', 'country', 'is_fully_filled']
+    list_display = ['user', 'first_name', 'last_name', 'referral_code', 'referral_link', 'referred_by', 'gender', 'country', 'is_fully_filled']
     list_filter = ['gender', 'country']
     search_fields = ['user__email', 'user__username']
 

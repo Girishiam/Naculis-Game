@@ -1,10 +1,13 @@
 from rest_framework import serializers
-from .models import CustomUser, UserProfile, UserDiscount
+from .models import CustomUser, UserProfile, UserDiscount,PendingRegistration
 from django_countries.fields import CountryField
 import cloudinary.uploader
+from django.contrib.auth import get_user_model
+from rest_framework_simplejwt.tokens import RefreshToken, TokenError
+from django.utils.translation import gettext_lazy as _
+
+
 # Register Serializer
-
-
 class RegisterSerializer(serializers.ModelSerializer):
     confirm_password = serializers.CharField(write_only=True)
     referral_code = serializers.CharField(required=False, allow_blank=True)
@@ -26,17 +29,17 @@ class RegisterSerializer(serializers.ModelSerializer):
         return data
 
     def create(self, validated_data):
-        from .models import UserDiscount, UserProfile  # Local import to avoid circular
-
-        # Remove confirm_password before user creation
         referral_code = validated_data.pop('referral_code', None)
+        password = validated_data.pop('password')
         validated_data.pop('confirm_password')
 
-        # Create user and UserProfile
-        user = CustomUser.objects.create_user(**validated_data)
+        # Create user and hash password
+        user = CustomUser(**validated_data)
+        user.set_password(password)
+        user.save()
+
         user_profile = user.userprofile
 
-        # If registered via referral, handle rewards and discounts
         if referral_code:
             try:
                 referrer_profile = UserProfile.objects.get(referral_code=referral_code)
@@ -49,51 +52,82 @@ class RegisterSerializer(serializers.ModelSerializer):
                 referrer_profile.referral_count += 1
                 referrer_profile.save()
 
-                # Grant a 50% discount to the **referee** (new user)
+                # 50% discount to referee
                 UserDiscount.objects.create(
                     user_profile=user_profile,
                     percent=50.00,
                     reason='Referral Sign-up'
                 )
 
-                # Optionally, also grant a discount to the **referrer**
+                # 20% discount to referrer
                 UserDiscount.objects.create(
                     user_profile=referrer_profile,
-                    percent=20.00,   # e.g., 20% for referrer; change as needed!
+                    percent=20.00,
                     reason=f'Referral Reward (for referring {user.username})'
                 )
 
-                # Other new user rewards
+                # Extra rewards to new user
                 user_profile.xp += 10
                 user_profile.gem += 5
                 user_profile.save()
+
             except UserProfile.DoesNotExist:
-                pass  # Invalid code, ignore
+                pass  # Invalid referral code
 
         return user
 
+        return user
+    
 
+#start registration serializer
+class StartRegistrationSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    username = serializers.CharField()
+    password = serializers.CharField(write_only=True)
+    confirm_password = serializers.CharField(write_only=True)
+    referral_code = serializers.CharField(required=False, allow_blank=True)
+
+    def validate(self, data):
+        if data["password"] != data["confirm_password"]:
+            raise serializers.ValidationError("Passwords do not match.")
+        return data
+
+
+
+#verify registration serializer
+class VerifyRegistrationOTPSerializer(serializers.Serializer):
+    email = serializers.EmailField()
+    otp = serializers.CharField(max_length=6)
 
 # Login Serializer
 
+
+
 class LoginSerializer(serializers.Serializer):
     email = serializers.EmailField()
-    name = serializers.CharField()
+    username = serializers.CharField()
     password = serializers.CharField()
     remember_me = serializers.BooleanField(default=False)
 
     def validate(self, data):
-        # Validate if the user exists with the provided email and username
+        email = data.get('email')
+        username = data.get('username')
+        password = data.get('password')
+
         try:
-            user = CustomUser.objects.get(email=data['email'], username=data['name'])
+            user = CustomUser.objects.get(email=email, username=username)
         except CustomUser.DoesNotExist:
-            raise serializers.ValidationError("Invalid credentials")
+           raise serializers.ValidationError({"detail": _("No User is available with that email + username.")})
 
-        # Validate password
-        if not user.check_password(data['password']):
-            raise serializers.ValidationError("Invalid credentials")
+        if not user.check_password(password):
+            raise serializers.ValidationError("Password is incorrect")
 
+        if not user.is_active:
+            raise serializers.ValidationError("User account is disabled")
+
+        data['user'] = user
         return data
+
 
 
 # OTP & Auth Helpers
@@ -107,6 +141,7 @@ class SendOTPSerializer(serializers.Serializer):
 
 class ResendOTPSerializer(serializers.Serializer):
     email = serializers.EmailField()
+    otp = serializers.CharField()
 
 class OTPVerifySerializer(serializers.Serializer):
     email = serializers.EmailField()
@@ -116,8 +151,22 @@ class ResetPasswordSerializer(serializers.Serializer):
     new_password = serializers.CharField()
     confirm_password = serializers.CharField()
 
+
+#logout serializer
+
 class LogoutSerializer(serializers.Serializer):
     refresh = serializers.CharField()
+
+    def validate(self, attrs):
+        self.token = attrs['refresh']
+        return attrs
+
+    def save(self, **kwargs):
+        try:
+            token = RefreshToken(self.token)
+            token.blacklist()
+        except TokenError:
+            raise serializers.ValidationError("Invalid or expired token.")
 
 
 # Delete Account
@@ -144,14 +193,17 @@ class UserDiscountSerializer(serializers.ModelSerializer):
 class UserProfileSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True)
     email = serializers.EmailField(source='user.email', read_only=True)
+    first_name = serializers.CharField(required=False, allow_blank=True)
+    last_name = serializers.CharField(required=False, allow_blank=True)
     country = serializers.CharField(source='country.name', read_only=True)  # Converts CountryField to a string
     referred_by = serializers.CharField(source='referred_by.username', read_only=True)  # Add referrer info
     discounts = UserDiscountSerializer(many=True, read_only=True)
+    
     class Meta:
         model = UserProfile
         fields = [
-            'username', 'email', 'phone', 'dob', 'gender', 'country', 'profile_picture',
-            'xp', 'daily_streak', 'star', 'gem', 'referred_by', 
+            'username', 'email', 'first_name', 'last_name','phone', 'dob', 'gender', 'country', 'profile_picture',
+            'xp', 'daily_streak', 'level', 'hearts', 'gem', 'referred_by', 
             'referral_code', 'referral_link', 'referral_count', 'discount_used','discounts'
         ]
 
@@ -163,14 +215,17 @@ class UserProfileSerializer(serializers.ModelSerializer):
         user.save()
 
         # Update UserProfile fields
+        instance.first_name = validated_data.get('first_name', instance.first_name)
+        instance.last_name = validated_data.get('last_name', instance.last_name)
         instance.dob = validated_data.get('dob', instance.dob)
         instance.country = validated_data.get('country', instance.country)
         instance.gender = validated_data.get('gender', instance.gender)
         instance.profile_picture = validated_data.get('profile_picture', instance.profile_picture)
         instance.xp = validated_data.get('xp', instance.xp)
         instance.daily_streak = validated_data.get('daily_streak', instance.daily_streak)
-        instance.star = validated_data.get('star', instance.star)
+        instance.level = validated_data.get('level', instance.level)
         instance.gem = validated_data.get('gem', instance.gem)
+        instance.hearts = validated_data.get('hearts', instance.hearts)
 
         instance.save()  # Save the updated UserProfile
         return instance
@@ -190,7 +245,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
 class UserProfileUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = UserProfile
-        fields = ['phone', 'dob', 'gender', 'country', 'profile_picture', 'previous_profile_picture']
+        fields = ['phone', 'first_name', 'last_name', 'dob', 'gender', 'country', 'profile_picture', 'previous_profile_picture']
         read_only_fields = ['previous_profile_picture']
 
     def update(self, instance, validated_data):

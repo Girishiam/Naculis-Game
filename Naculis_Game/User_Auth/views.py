@@ -9,22 +9,24 @@ from datetime import timedelta
 from django.contrib.auth import authenticate
 import random
 from rest_framework.parsers import MultiPartParser, FormParser
-import uuid
+from django.utils.translation import gettext_lazy as _
+
+from django.utils import translation
+from django.conf import settings
+from django.utils.translation import gettext as _
 from rest_framework import generics, permissions, status
 from django.utils import timezone
 
-import cloudinary
-import cloudinary.uploader
-import cloudinary.api
 
-from django.core.files.storage import default_storage
-from .models import CustomUser, UserProfile, UserDiscount
+from .models import CustomUser, UserProfile, UserDiscount,PendingRegistration
+
+
 
 
 
 from .serializers import (
-    RegisterSerializer, LoginSerializer, EmailOTPSerializer,
-    UserProfileSerializer, UserProfileUpdateSerializer, UserDiscountSerializer
+   RegisterSerializer, StartRegistrationSerializer, VerifyRegistrationOTPSerializer, LoginSerializer, EmailOTPSerializer,
+    UserProfileSerializer, UserProfileUpdateSerializer, UserDiscountSerializer, LogoutSerializer
 )
 
 
@@ -32,54 +34,123 @@ User = get_user_model()
 otp_storage = {}         # Temporary in-memory OTP store
 verified_email = {}      # Temporary email verification store
 
+#language set
+
+
+
 # -------------------------------
 #           Register
 # -------------------------------
-# views.py
-
 
 
 User = get_user_model()
-
-class RegisterView(APIView):
+class StartRegistrationView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
-        # Get referral code from body or URL
-        referral_code = request.data.get('referral_code')
-        referral_code_from_url = request.query_params.get('ref')
-        referral_code_to_use = referral_code or referral_code_from_url
-
+        referral_code = request.data.get("referral_code") or request.query_params.get("ref", "")
         data = request.data.copy()
-        if referral_code_to_use:
-            data['referral_code'] = referral_code_to_use
+        data["referral_code"] = referral_code
 
-        serializer = RegisterSerializer(data=data)
+        serializer = StartRegistrationSerializer(data=data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        email = data["email"]
+        username = data["username"]
+
+        # Don't register if user already exists
+        if User.objects.filter(email=email).exists():
+            return Response({"error": "Email already registered."}, status=400)
+        if User.objects.filter(username=username).exists():
+            return Response({"error": "Username already taken."}, status=400)
+
+        # Generate OTP
+        otp = str(random.randint(100000, 999999))
+        expires_at = timezone.now() + timedelta(minutes=5)
+
+        # Delete previous attempt
+        PendingRegistration.objects.filter(email=email).delete()
+
+        # Save to temporary registration
+        PendingRegistration.objects.create(
+            email=email,
+            username=username,
+            raw_password=data["password"],  # Not hashed yet
+            password=data["password"],      # Same here
+            otp=otp,
+            expires_at=expires_at,
+            referral_code=referral_code,
+            referral_link=f"http://127.0.0.1:8000/api/register/?ref={referral_code}" if referral_code else None
+        )
+
+        # Send OTP
+        try:
+            send_mail(
+                subject="Verify your email",
+                message=f"Your OTP is: {otp}. It expires in 5 minutes.",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+            )
+        except Exception as e:
+            return Response({"error": f"Failed to send OTP: {str(e)}"}, status=500)
+
+        return Response({"msg": "OTP sent to your email. Please verify to complete registration."}, status=200)
+
+
+
+#start registration OTP verification view
+class VerifyRegistrationOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        serializer = VerifyRegistrationOTPSerializer(data=request.data)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
+
+        data = serializer.validated_data
+        try:
+            pending = PendingRegistration.objects.get(email=data["email"])
+        except PendingRegistration.DoesNotExist:
+            return Response({"error": "No pending registration found."}, status=404)
+
+        if pending.is_expired():
+            pending.delete()
+            return Response({"error": "OTP has expired."}, status=400)
+
+        if data["otp"] != pending.otp:
+            return Response({"error": "Invalid OTP."}, status=400)
+
+        # All checks passed – create the user
+        payload = {
+            "username": pending.username,
+            "email": pending.email,
+            "password": pending.password,
+            "confirm_password": pending.password,
+            "referral_code": pending.referral_code,
+        }
+
+        serializer = RegisterSerializer(data=payload)
         if serializer.is_valid():
-            try:
-                user = serializer.save()
-                user_profile = user.userprofile
+            user = serializer.save()
 
-                # Generate referral code/link if not set
-                if not user_profile.referral_code:
-                    user_profile.referral_code = user_profile.generate_referral_code()
-                if not user_profile.referral_link:
-                    user_profile.referral_link = user_profile.generate_referral_link()
-                user_profile.save()
+            profile = user.userprofile
+            profile.referral_code = profile.generate_referral_code()
+            profile.referral_link = profile.generate_referral_link()
+            profile.save()
 
-                return Response({
-                    "msg": "User registered successfully",
-                    "referral_code": user_profile.referral_code,
-                    "referral_link": user_profile.referral_link,
-                    "referred_by": user_profile.referred_by.user.username if user_profile.referred_by else None
-                }, status=201)
+            # Cleanup pending
+            pending.delete()
 
-            except Exception as e:
-                print(f"Error during registration: {str(e)}")
-                return Response({"error": f"Registration failed. Please try again. Error: {str(e)}"}, status=500)
+            refresh = RefreshToken.for_user(user)
+            return Response({
+                "msg": "User registered successfully",
+                "referral_code": profile.referral_code,
+                "referral_link": profile.referral_link,
+                "referred_by": profile.referred_by.user.username if profile.referred_by else None,
+            }, status=201)
 
         return Response(serializer.errors, status=400)
-
 
 
 
@@ -114,30 +185,20 @@ class LoginView(APIView):
 
     def post(self, request):
         serializer = LoginSerializer(data=request.data)
-        if serializer.is_valid():
-            email = serializer.validated_data['email']
-            name = serializer.validated_data['name']
-            password = serializer.validated_data['password']
-            remember_me = serializer.validated_data['remember_me']
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=400)
 
-            try:
-                user = User.objects.get(email=email, username=name)
-                if not user.check_password(password):
-                    raise ValueError
-            except (User.DoesNotExist, ValueError):
-                return Response({"error": "Invalid credentials"}, status=401)
+        user = serializer.validated_data['user']
+        remember_me = serializer.validated_data.get('remember_me', False)
 
-            # Generate Refresh Token
-            refresh = RefreshToken.for_user(user)
-            if remember_me:
-                refresh.set_exp(lifetime=timedelta(days=30))  # Remember me logic (longer expiration)
+        refresh = RefreshToken.for_user(user)
+        if remember_me:
+            refresh.set_exp(lifetime=timedelta(days=30))
 
-            # Return both access and refresh tokens
-            return Response({
-                "access": str(refresh.access_token),
-                "refresh": str(refresh)
-            })
-        return Response(serializer.errors, status=400)
+        return Response({
+            "access": str(refresh.access_token),
+            "refresh": str(refresh)
+        })
 
 
 # -------------------------------
@@ -153,27 +214,62 @@ class SendOTPView(APIView):
         if serializer.is_valid():
             email = serializer.validated_data['email']
             otp = str(random.randint(100000, 999999))
-            otp_storage[email] = otp
 
-            subject = 'Your OTP for Password Reset'
-            message = f'Your OTP is: {otp}'
+            # Set OTP and expiry (5 minutes from now)
+            otp_storage[email] = {
+                "otp": otp,
+                "expires_at": timezone.now() + timedelta(minutes=5)
+            }
+
+            subject = 'Your OTP for Registration / Password Reset'
+            message = f'Your OTP is: {otp} (valid for 5 minutes)'
             from_email = settings.DEFAULT_FROM_EMAIL
 
             try:
                 send_mail(subject, message, from_email, [email])
                 return Response({"msg": "OTP sent to email"}, status=200)
-            except Exception as e:
-                return Response({"error": "Failed to send email"}, status=500)
+            except Exception:
+                return Response({"error": "Failed to send OTP"}, status=500)
+
         return Response(serializer.errors, status=400)
 
-class ResendOTPView(SendOTPView):
-    pass
+
+# -------------------------------
+#         Resend OTP
+class ResendOTPView(APIView):
+    permission_classes = [AllowAny]
+
+    def post(self, request):
+        email = request.data.get("email")
+        if not email:
+            return Response({"error": "Email is required."}, status=400)
+
+        try:
+            pending = PendingRegistration.objects.get(email=email)
+        except PendingRegistration.DoesNotExist:
+            return Response({"error": "No registration found."}, status=404)
+
+        # Generate new OTP
+        otp = str(random.randint(100000, 999999))
+        pending.otp = otp
+        pending.expires_at = timezone.now() + timedelta(minutes=5)
+        pending.save()
+
+        try:
+            send_mail(
+                subject="Resend OTP",
+                message=f"Your new OTP is: {otp}",
+                from_email=settings.DEFAULT_FROM_EMAIL,
+                recipient_list=[email],
+            )
+            return Response({"msg": "OTP resent successfully."}, status=200)
+        except Exception as e:
+            return Response({"error": f"Failed to send OTP: {str(e)}"}, status=500)
 
 
 # -------------------------------
 #         Verify OTP
 # -------------------------------
-
 
 class VerifyOTPView(APIView):
     permission_classes = [AllowAny]
@@ -183,20 +279,31 @@ class VerifyOTPView(APIView):
         otp = request.data.get("otp")
 
         if not email or not otp:
-            return Response({"error": "Email and OTP are required"}, status=400)
+            return Response({"error": "Email and OTP are required."}, status=400)
 
-        if otp_storage.get(email) == otp:
-            verified_email["user"] = email
-            otp_storage.pop(email, None)  # Clear OTP after verification
-            return Response({"msg": "OTP verified"}, status=200)
-        return Response({"error": "Invalid OTP"}, status=400)
+        otp_data = otp_storage.get(email)
+        if not otp_data:
+            return Response({"error": "OTP not sent or expired."}, status=400)
 
+        if timezone.now() > otp_data["expires_at"]:
+            otp_storage.pop(email, None)
+            return Response({"error": "OTP has expired."}, status=400)
+
+        if otp != otp_data["otp"]:
+            return Response({"error": "Invalid OTP."}, status=400)
+
+        # ✅ Mark email as verified
+        verified_email["user"] = email
+        otp_storage.pop(email, None)
+
+        return Response({"msg": "OTP verified successfully."}, status=200)
+
+        return Response({"msg": "OTP verified successfully"}, status=200)
 
 
 # -------------------------------
 #       Reset Password
 # -------------------------------
-
 
 
 class ResetPasswordView(APIView):
@@ -220,10 +327,14 @@ class ResetPasswordView(APIView):
             user = CustomUser.objects.get(email=email)
             user.set_password(new_password)
             user.save()
+
+            # Remove verified marker
             verified_email.pop("user", None)
+
             return Response({"msg": "Password updated successfully"}, status=200)
         except CustomUser.DoesNotExist:
             return Response({"error": "User not found"}, status=404)
+
 
 # -------------------------------
 #            Logout
@@ -233,21 +344,11 @@ class LogoutView(APIView):
     permission_classes = [IsAuthenticated]
 
     def post(self, request):
-        # Extract the refresh token from the request body
-        refresh_token = request.data.get("refresh")
-        print(refresh_token)
-        if not refresh_token:
-            return Response({"error": "Refresh token missing"}, status=400)
-
-        try:
-            # Blacklist the refresh token to invalidate it
-            token = RefreshToken(refresh_token)
-            token.blacklist()  # Blacklist the refresh token
-            
-            return Response({"msg": "Logged out successfully"}, status=205)
-
-        except Exception as e:
-            return Response({"error": str(e)}, status=400)
+        serializer = LogoutSerializer(data=request.data)
+        if serializer.is_valid():
+            serializer.save()
+            return Response({"msg": "Successfully logged out."}, status=status.HTTP_205_RESET_CONTENT)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
 
 # -------------------------------
@@ -382,11 +483,10 @@ class AdminCreateDiscountView(generics.CreateAPIView):
         try:
             user_profile = UserProfile.objects.get(id=user_profile_id)
         except UserProfile.DoesNotExist:
-            raise serializers.ValidationError("UserProfile not found.")
+            raise serializer.ValidationError("UserProfile not found.")
         serializer.save(user_profile=user_profile)
 
 # Mark a discount as used (apply a discount)
-from rest_framework.views import APIView
 
 class UseDiscountView(APIView):
     permission_classes = [permissions.IsAuthenticated]

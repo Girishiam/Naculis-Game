@@ -42,6 +42,8 @@ INSTALLED_APPS = [
 
     #PROJECT APPS
     "User_Auth",
+    "shop",
+    "core_app",
 
 
 
@@ -68,6 +70,22 @@ SPECTACULAR_SETTINGS = {
     'DESCRIPTION': 'User authentication system with JWT, OTP and remember me',
     'VERSION': '0.26.4',
 }
+
+
+LANGUAGE_CODE = 'en'
+
+LANGUAGES = [
+    ('en', 'English'),
+    ('es', 'Spanish'),
+]
+
+USE_I18N = True
+USE_L10N = True
+USE_TZ = True
+
+LOCALE_PATHS = [
+    BASE_DIR / 'locale',
+]
 
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",

@@ -3,7 +3,7 @@ from django.db import models
 from django_countries.fields import CountryField
 import uuid
 from cloudinary.models import CloudinaryField
-
+from django.utils import timezone
 class CustomUser(AbstractUser):
     ROLE_CHOICES = [
         ('admin', 'Admin'),
@@ -33,15 +33,19 @@ class UserProfile(models.Model):
     ]
 
     user = models.OneToOneField(CustomUser, on_delete=models.CASCADE)
+    first_name = models.CharField(max_length=50, blank=True, null=True)
+    last_name = models.CharField(max_length=50, blank=True, null=True)
+
     dob = models.DateField(null=True, blank=True)
     gender = models.CharField(max_length=10, choices=GENDER_CHOICES, default='N')
     country = CountryField(blank_label='Select Country', null=True, blank=True)
     profile_picture = CloudinaryField('image', blank=True, null=True)
     previous_profile_picture = CloudinaryField('image', blank=True, null=True)
     balance = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
-    xp = models.IntegerField(default=5)
+    xp = models.IntegerField(default=0)
     daily_streak = models.IntegerField(default=0)
-    star = models.IntegerField(default=0)
+    level = models.IntegerField(default=0)
+    hearts = models.IntegerField(default=5)
     gem = models.IntegerField(default=0)
     phone = models.CharField(max_length=15, blank=True, null=True)
     referral_code = models.CharField(max_length=20, unique=True, blank=True, null=True)
@@ -94,3 +98,18 @@ class UserDiscount(models.Model):
 
     def __str__(self):
         return f"{self.user_profile.user.username}: {self.percent}% ({'used' if self.used else 'unused'})"
+    
+
+class PendingRegistration(models.Model):
+    email = models.EmailField(unique=True)
+    username = models.CharField(max_length=150)
+    raw_password = models.CharField(max_length=128, blank=True, null=True)  # ✅ Add this
+    password = models.CharField(max_length=128)
+    otp = models.CharField(max_length=6)
+    expires_at = models.DateTimeField()
+    referral_code = models.CharField(max_length=20, blank=True, null=True)
+    referral_link = models.URLField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def is_expired(self):
+        return timezone.now() > self.expires_at
