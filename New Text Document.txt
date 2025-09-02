@@ -1,2 +1,5 @@
 ngrok config add-authtoken 30adSY8U06qUxcEhAVothRihfBb_6Y7QTLrxKzGUPnHVJqc1Y
+
 ngrok http 103.186.20.115:10002
+
+https://384fc1653f82.ngrok-free.app
